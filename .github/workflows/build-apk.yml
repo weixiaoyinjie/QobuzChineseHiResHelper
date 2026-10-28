@@ -5,67 +5,59 @@ on:
   push:
     branches: [main, master]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
     steps:
-      - name: Checkout sources
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Install JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Check preinstalled Android SDK
-        run: |
-          test -d "$ANDROID_HOME/platforms/android-35" || { echo 'Android platform 35 missing'; exit 1; }
-          test -d "$ANDROID_HOME/build-tools/35.0.0" || { echo 'Android build tools 35 missing'; exit 1; }
-
-      - name: Configure Gradle 8.11.1
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
 
-      - name: Locate Android project or unzip source ZIP
+      - name: Locate newest ZIP or Android source
         shell: bash
         run: |
           set -euo pipefail
-          PROJECT_DIR=""
-          if [ -f settings.gradle ]; then
-            PROJECT_DIR="$PWD"
+          # Prefer newest uploaded source ZIP, even when old source files still exist.
+          ZIP="$(find . -maxdepth 4 -type f -iname 'QobuzChineseHiResHelper_v*.zip' -print | sort -V | tail -n 1)"
+          if [ -n "$ZIP" ]; then
+            echo "Using newest source: $ZIP"
+            PROJECT_ROOT="$RUNNER_TEMP/qobuz-latest"
+            mkdir -p "$PROJECT_ROOT"
+            unzip -q "$ZIP" -d "$PROJECT_ROOT"
+            PROJECT_DIR="$(find "$PROJECT_ROOT" -maxdepth 5 -name settings.gradle -type f -printf '%h\n' -quit)"
           else
-            PROJECT_DIR="$(find . -maxdepth 5 -type f -name settings.gradle -printf '%h\n' -quit)"
+            PROJECT_DIR="$(find . -maxdepth 5 -name settings.gradle -type f -printf '%h\n' -quit)"
           fi
-
-          if [ -z "$PROJECT_DIR" ]; then
-            ZIP="$(find . -maxdepth 2 -type f -iname '*Qobuz*.zip' -print -quit)"
-            if [ -z "$ZIP" ]; then
-              ZIP="$(find . -maxdepth 2 -type f -iname '*.zip' -print -quit)"
-            fi
-            if [ -z "$ZIP" ]; then
-              echo 'Cannot find settings.gradle or a source ZIP.'
-              exit 1
-            fi
-            echo "Unzipping $ZIP"
-            mkdir -p "$RUNNER_TEMP/qobuz-source"
-            unzip -q "$ZIP" -d "$RUNNER_TEMP/qobuz-source"
-            PROJECT_DIR="$(find "$RUNNER_TEMP/qobuz-source" -maxdepth 5 -type f -name settings.gradle -printf '%h\n' -quit)"
-          fi
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo 'Cannot locate Android project settings.gradle after extraction.'
+          if [ -z "$PROJECT_DIR" ] || [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+            echo 'No valid Android project found. Upload the complete source ZIP.' >&2
             exit 1
           fi
-          test -f "$PROJECT_DIR/build.gradle"
-          test -f "$PROJECT_DIR/app/build.gradle"
-          echo "Android project located: $PROJECT_DIR"
-          echo "ANDROID_PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_PROJECT_DIR=$(realpath "$PROJECT_DIR")" >> "$GITHUB_ENV"
+          echo "Selected source: $PROJECT_DIR"
 
-      - name: Build debug APK
+      - name: Install Android SDK platform and build tools if necessary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d "$ANDROID_HOME/platforms/android-35" ] || [ ! -d "$ANDROID_HOME/build-tools/35.0.0" ]; then
+            yes | sdkmanager --licenses >/dev/null || true
+            sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+          fi
+
+      - name: Compile APK
         shell: bash
         run: |
           set -euo pipefail
@@ -73,9 +65,9 @@ jobs:
           gradle --no-daemon --stacktrace :app:assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/app-debug.apk"
 
-      - name: Upload APK
+      - name: Upload latest APK
         uses: actions/upload-artifact@v4
         with:
-          name: QobuzChineseHiResHelper-debug
+          name: QobuzChineseHiResHelper-v1_2-debug
           path: app-debug.apk
           if-no-files-found: error
